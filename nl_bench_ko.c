@@ -14,18 +14,21 @@ static int send_msg_to_user(int pid, const char* payload, uint32_t payload_size)
     int res;
 
     // Craft the message
-    skb_out = nlmsg_new(payload_size, 0);
+    skb_out = nlmsg_new(payload_size, GFP_KERNEL);
     if (!skb_out) {
         printk(KERN_ERR "Failed to allocate new skb for reply\n");
         return -1;
     }
 
     nlh = nlmsg_put(skb_out, 0, 0, NLMSG_DONE, payload_size, 0);
-    NETLINK_CB(skb_out).dst_group = 0;
+    NETLINK_CB(skb_out).portid = 0;
+    NETLINK_CB(skb_out).dst_group = NETLINK_GRP_BENCH;
     memcpy(nlmsg_data(nlh), payload, payload_size);
 
     // Send the message back
-    res = nlmsg_unicast(nl_sk, skb_out, pid);
+    // res = nlmsg_unicast(nl_sk, skb_out, pid);
+    res = nlmsg_multicast(nl_sk, skb_out, 0, NETLINK_GRP_BENCH, GFP_KERNEL);
+
     if (res < 0) {
         printk(KERN_INFO "Error while sending back to user: %d\n", res);
         return -1;

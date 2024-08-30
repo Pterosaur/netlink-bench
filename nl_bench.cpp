@@ -20,7 +20,7 @@ int main(int argc, char **argv)
 {
     int ret = 0;
 
-    if (argc != 4) {
+    if (argc != 5) {
         printf("Usage: %s <msg-count> <payload-size> <iterations>\n", argv[0]);
         return 1;
     }
@@ -28,6 +28,7 @@ int main(int argc, char **argv)
     uint32_t msg_count = std::atoi(argv[1]);
     uint32_t payload_size = std::atoi(argv[2]);
     uint32_t iterations = std::atoi(argv[3]);
+    uint32_t role = std::atoi(argv[4]);
     printf("Starting test with receiving %u messages of size %u for %u interations (%u MB in total)\n\n",
         msg_count,
         payload_size,
@@ -45,13 +46,13 @@ int main(int argc, char **argv)
 
     uint64_t total_elapsed_time_us = 0;
     for (uint32_t iteration = 0; iteration < iterations; iteration++) {
-        if (send_bench_request(sock_fd, msg_count, payload_size) < 0) {
+        if (role == 0 && send_bench_request(sock_fd, msg_count, payload_size) < 0) {
             printf("Failed to send bench request. Exiting.\n");
             goto CLEANUP;
         }
 
         std::chrono::nanoseconds elapsed_time;
-        if (benchmark_netlink_read(sock_fd, msg_count, payload_size, elapsed_time) < 0) {
+        if (role == 1 && benchmark_netlink_read(sock_fd, msg_count, payload_size, elapsed_time) < 0) {
             printf("Failed to run netlink read benchmarks. Exiting.\n");
             goto CLEANUP;
         }
@@ -83,6 +84,7 @@ CLEANUP:
 int create_netlink_socket()
 {
     int sock_fd = socket(PF_NETLINK, SOCK_RAW, NETLINK_PROTO_BENCH);
+    static int group = NETLINK_GRP_BENCH;
     if (sock_fd < 0) {
         printf("socket: %s\n", strerror(errno));
         return -1;
@@ -91,11 +93,16 @@ int create_netlink_socket()
     struct sockaddr_nl src_addr = {0};
     src_addr.nl_family = AF_NETLINK;
     src_addr.nl_pid = getpid();
-    src_addr.nl_groups = 0;
+    // src_addr.nl_groups = 0;
 
     int bind_err = bind(sock_fd, (struct sockaddr *)&src_addr, sizeof(src_addr));
     if (bind_err < 0) {
         printf("bind: %s\n", strerror(errno));
+        return -1;
+    }
+
+    if (setsockopt(sock_fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP, &group, sizeof(group)) < 0) {
+        perror("setsockopt");
         return -1;
     }
 
@@ -161,8 +168,8 @@ int benchmark_netlink_read(
     // Create socket message with kernel as destination.
     struct sockaddr_nl dest_addr = {0};
     dest_addr.nl_family = AF_NETLINK;
-    dest_addr.nl_pid = 0;    /* For Linux Kernel */
-    dest_addr.nl_groups = 0; /* unicast */
+    dest_addr.nl_pid = getpid();    /* For Linux Kernel */
+    // dest_addr.nl_groups = 3; /* unicast */
 
     struct iovec iov;
     memset(&iov, 0, sizeof(iov));

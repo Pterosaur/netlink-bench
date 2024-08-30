@@ -1,4 +1,4 @@
-KERNEL_DIR=/usr/src/kernel-headers-5.10.0-23-2-amd64
+KERNEL_DIR=/usr/src/linux-headers-$(shell uname -r)
 obj-m += nl_bench_ko.o
 ccflags-y := -Wno-declaration-after-statement
 
@@ -9,7 +9,7 @@ bench-cli:
 	g++ -O2 nl_bench.cpp -o ./output/nl_bench
 
 bench-ko:
-	make -C /lib/modules/5.10.0-23-2-amd64/build M=$(PWD) modules
+	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
 
 test: test-prepare test-run test-cleanup
 
@@ -19,7 +19,9 @@ test-prepare:
 
 test-run:
 	# Test 1 message with 1MB data for 1000 rounds - 1GB data in total
-	./output/nl_bench 1 1048576 1000
+	sudo ./output/nl_bench 1 1048576 1000 1 &
+	sudo ./output/nl_bench 1 1048576 1000 0 > /dev/null
+
 
 test-cleanup:
 	# Unload kernel module
