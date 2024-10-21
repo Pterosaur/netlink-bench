@@ -1,3 +1,7 @@
+SHELL = /bin/bash
+.ONESHELL:
+.SHELLFLAGS += -xe
+
 KERNEL_DIR=/usr/src/linux-headers-$(shell uname -r)
 obj-m += nl_bench_ko.o
 ccflags-y := -Wno-declaration-after-statement
@@ -6,7 +10,10 @@ all: bench-cli bench-ko
 
 bench-cli:
 	mkdir -p ./output
-	g++ -O2 nl_bench.cpp -o ./output/nl_bench
+	g++ -O2 nl_bench.cpp -I/usr/include/libnl3 -lnl-3 -lnl-genl-3 -o ./output/nl_bench
+	pushd bench-rs
+	cargo build
+	popd
 
 bench-ko:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
@@ -19,8 +26,9 @@ test-prepare:
 
 test-run:
 	# Test 1 message with 1MB data for 1000 rounds - 1GB data in total
-	sudo ./output/nl_bench 1 1048576 1000 1 &
-	sudo ./output/nl_bench 1 1048576 1000 0 > /dev/null
+	# sudo ./output/nl_bench 1 1048576 1000 1 &
+	# sudo ./output/nl_bench 1 1048576 1000 0 > /dev/null
+	sudo ./output/nl_bench
 
 
 test-cleanup:

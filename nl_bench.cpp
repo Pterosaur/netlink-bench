@@ -12,190 +12,166 @@
 
 #include "nl_bench_common.h"
 
-int create_netlink_socket();
-int send_bench_request(int nl_sock, uint32_t msg_count, uint32_t payload_size);
-int benchmark_netlink_read(int nl_sock, uint32_t msg_count, uint32_t payload_size, std::chrono::nanoseconds& elapsed_time);
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <linux/genetlink.h>
+#include <linux/netlink.h>
+#include <netlink/genl/genl.h>
+#include <netlink/genl/ctrl.h>
+#include <netlink/genl/genl.h>
+#include <netlink/attr.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
-int main(int argc, char **argv)
+#define NL_BENCH_CMD_ECHO 1
+#define NL_BENCH_ATTR_MSG_COUNT 1
+#define NL_BENCH_ATTR_PAYLOAD_SIZE 2
+
+
+struct generic_netlink_msg {
+    /** Netlink header comes first. */
+    struct nlmsghdr n;
+    /** Afterwards the Generic Netlink header */
+    struct genlmsghdr g;
+    /** Custom data. Space for Netlink Attributes. */
+    char buf[256];
+};
+
+static int error_handler(struct sockaddr_nl *nla, struct nlmsgerr *err,
+				void *arg)
 {
-    int ret = 0;
+	int *ret = (int *)arg;
 
-    if (argc != 5) {
-        printf("Usage: %s <msg-count> <payload-size> <iterations>\n", argv[0]);
-        return 1;
-    }
-
-    uint32_t msg_count = std::atoi(argv[1]);
-    uint32_t payload_size = std::atoi(argv[2]);
-    uint32_t iterations = std::atoi(argv[3]);
-    uint32_t role = std::atoi(argv[4]);
-    printf("Starting test with receiving %u messages of size %u for %u interations (%u MB in total)\n\n",
-        msg_count,
-        payload_size,
-        iterations,
-        payload_size / 1024 / 1024 * msg_count * iterations);
-
-    int sock_fd = create_netlink_socket();
-    if (sock_fd < 0) {
-        printf("Failed to create netlink socket. Exiting.\n");
-        return 1;
-    }
-
-    printf("| Iteration | Time (Total, us) | Time (Single Read, us) |\n");
-    printf("| --------- | ---------------- | ---------------------- |\n");
-
-    uint64_t total_elapsed_time_us = 0;
-    for (uint32_t iteration = 0; iteration < iterations; iteration++) {
-        if (role == 0 && send_bench_request(sock_fd, msg_count, payload_size) < 0) {
-            printf("Failed to send bench request. Exiting.\n");
-            goto CLEANUP;
-        }
-
-        std::chrono::nanoseconds elapsed_time;
-        if (role == 1 && benchmark_netlink_read(sock_fd, msg_count, payload_size, elapsed_time) < 0) {
-            printf("Failed to run netlink read benchmarks. Exiting.\n");
-            goto CLEANUP;
-        }
-
-        auto elapsed_time_us = std::chrono::duration_cast<std::chrono::microseconds>(elapsed_time).count();
-        total_elapsed_time_us += elapsed_time_us;
-
-        printf(
-            "| #%-8u | %-16lu | %-22lu |\n",
-            iteration,
-            elapsed_time_us,
-            elapsed_time_us / msg_count);
-    }
-
-    printf(
-        "| %-9s | %-16lu | %-22lu |\n",
-        "Total",
-        total_elapsed_time_us,
-        total_elapsed_time_us / msg_count / iterations);
-
-CLEANUP:
-    if (sock_fd >= 0) {
-        close(sock_fd);
-    }
-
-    return ret;
+	*ret = err->error;
+    printf("Error received\n");
+	return NL_SKIP;
 }
 
-int create_netlink_socket()
+static int ack_handler(struct nl_msg *msg, void *arg)
 {
-    int sock_fd = socket(PF_NETLINK, SOCK_RAW, NETLINK_PROTO_BENCH);
-    static int group = NETLINK_GRP_BENCH;
-    if (sock_fd < 0) {
-        printf("socket: %s\n", strerror(errno));
-        return -1;
-    }
+	int *ack = (int *)arg;
 
-    struct sockaddr_nl src_addr = {0};
-    src_addr.nl_family = AF_NETLINK;
-    src_addr.nl_pid = getpid();
-    // src_addr.nl_groups = 0;
-
-    int bind_err = bind(sock_fd, (struct sockaddr *)&src_addr, sizeof(src_addr));
-    if (bind_err < 0) {
-        printf("bind: %s\n", strerror(errno));
-        return -1;
-    }
-
-    if (setsockopt(sock_fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP, &group, sizeof(group)) < 0) {
-        perror("setsockopt");
-        return -1;
-    }
-
-    return sock_fd;
+	*ack = 1;
+    printf("Ack received\n");
+	return NL_STOP;
 }
 
-int send_bench_request(int nl_sock, uint32_t msg_count, uint32_t payload_size) {
-    // Build netlink message.
-    std::vector<char> buffer(NLMSG_SPACE(sizeof(NLBenchRequest)), 0);
-    struct nlmsghdr *nlh = (struct nlmsghdr *)&buffer[0];
-    nlh->nlmsg_len = (uint32_t)buffer.size();
-    nlh->nlmsg_pid = getpid();
-    nlh->nlmsg_flags = 0;
+static int finish_handler(struct nl_msg *msg, void *arg)
+{
+	int *done = (int *)arg;
 
-    NLBenchRequest req = {
-        .msg_count = msg_count,
-        .payload_size = payload_size
-    };
-    memcpy(NLMSG_DATA(nlh), &req, sizeof(NLBenchRequest));
+	*done = 1;
+    printf("Finish received\n");
+	return NL_SKIP;
+}
 
-    // Build the socket message with kernel as destination.
-    struct sockaddr_nl dest_addr = {0};
-    dest_addr.nl_family = AF_NETLINK;
-    dest_addr.nl_pid = 0;    /* For Linux Kernel */
-    dest_addr.nl_groups = 0; /* unicast */
+static int handler(struct nl_msg *msg, void *arg)
+{
+    printf("Handler called\n");
 
-    struct iovec iov;
-    memset(&iov, 0, sizeof(iov));
-    iov.iov_base = (void *)nlh;
-    iov.iov_len = nlh->nlmsg_len;
+    return NL_OK;
+}
 
-    struct msghdr msg;
-    memset(&msg, 0, sizeof(msg));
-    msg.msg_name = (void *)&dest_addr;
-    msg.msg_namelen = sizeof(dest_addr);
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-
-    // Send request
-    int send_request_err = sendmsg(nl_sock, &msg, 0);
-    if (send_request_err < 0) {
-        printf("sendmsg(): %s\n", strerror(errno));
+int main() {
+    struct nl_sock *sock;
+    struct nl_msg *msg;
+    int family_id;
+    int ret;
+    
+    // Initialize socket
+    sock = nl_socket_alloc();
+    if (!sock) {
+        fprintf(stderr, "Failed to allocate socket.\n");
         return -1;
     }
 
-    return 0;
-}
+    // Connect to Generic Netlink
+    if (genl_connect(sock)) {
+        fprintf(stderr, "Failed to connect to Generic Netlink.\n");
+        nl_socket_free(sock);
+        return -1;
+    }
+    genl_ctrl_resolve_grp(sock, NETLINK_FAMILY_NAME, NETLINK_GROUPS);
 
-int benchmark_netlink_read(
-    int nl_sock,
-    uint32_t msg_count,
-    uint32_t payload_size,
-    std::chrono::nanoseconds& elapsed_time)
-{
-    // Create read buffer
-    std::vector<char> buffer(NLMSG_SPACE(payload_size), 0);
-
-    struct nlmsghdr *nlh = (struct nlmsghdr *)&buffer[0];
-    nlh->nlmsg_len = (uint32_t)buffer.size();
-    nlh->nlmsg_pid = getpid();
-    nlh->nlmsg_flags = 0;
-
-    // Create socket message with kernel as destination.
-    struct sockaddr_nl dest_addr = {0};
-    dest_addr.nl_family = AF_NETLINK;
-    dest_addr.nl_pid = getpid();    /* For Linux Kernel */
-    // dest_addr.nl_groups = 3; /* unicast */
-
-    struct iovec iov;
-    memset(&iov, 0, sizeof(iov));
-    iov.iov_base = (void *)nlh;
-    iov.iov_len = nlh->nlmsg_len;
-
-    struct msghdr msg;
-    memset(&msg, 0, sizeof(msg));
-    msg.msg_name = (void *)&dest_addr;
-    msg.msg_namelen = sizeof(dest_addr);
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-
-    // Receive message
-    auto start_time = std::chrono::high_resolution_clock::now();
-    for (uint32_t i = 0; i < msg_count; i++) {
-        int recv_err = recvmsg(nl_sock, &msg, 0);
-        if (recv_err < 0) {
-            printf("sendmsg(): %s\n", strerror(errno));
-            return -1;
-        }
+    // Resolve the family name to ID
+    family_id = genl_ctrl_resolve(sock, NETLINK_FAMILY_NAME);
+    if (family_id < 0) {
+        fprintf(stderr, "Family name %s not resolved.\n", NETLINK_FAMILY_NAME);
+        nl_socket_free(sock);
+        return -1;
     }
 
-    // Calculate elapsed time
-    auto end_time = std::chrono::high_resolution_clock::now();
-    elapsed_time = end_time - start_time;
+    // Allocate a new message
+    msg = nlmsg_alloc();
+    if (!msg) {
+        fprintf(stderr, "Failed to allocate netlink message.\n");
+        nl_socket_free(sock);
+        return -1;
+    }
 
+    // Construct the Generic Netlink message
+    genlmsg_put(msg, NL_AUTO_PORT, NL_AUTO_SEQ, family_id, 0, 0, NL_BENCH_CMD_ECHO, 1);
+
+    // Add attributes to the message
+    nla_put_u32(msg, NL_BENCH_ATTR_MSG_COUNT, 5);
+    nla_put_u32(msg, NL_BENCH_ATTR_PAYLOAD_SIZE, 128);
+
+    // Send the message
+    ret = nl_send_auto(sock, msg);
+    if (ret < 0) {
+        fprintf(stderr, "Failed to send message: %s\n", nl_geterror(ret));
+        nlmsg_free(msg);
+        nl_socket_free(sock);
+        return -1;
+    }
+
+    // Receive the response (blocking)
+    nlmsg_free(msg);  // Free the message
+
+    struct generic_netlink_msg nl_response_msg;
+
+    // int nl_rxtx_length = recv(nl_socket_get_fd(sock), &nl_response_msg, sizeof(nl_response_msg), 0);
+    // // Validate response message
+    // if (!NLMSG_OK((&nl_response_msg.n), nl_rxtx_length)) {
+    //     fprintf(stderr, "family ID request : invalid message\n");
+    //     fprintf(stderr, "error validating family id request result: invalid length\n");
+    //     return -1;
+    // }
+    // if (nl_response_msg.n.nlmsg_type == NLMSG_ERROR) { // error
+    //     fprintf(stderr, "family ID request : receive error\n");
+    //     fprintf(stderr, "error validating family id request result: receive error\n");
+    //     return -1;
+    // }
+
+    struct nl_cb * cb = NULL;
+    cb = nl_cb_alloc(NL_CB_CUSTOM);
+    int err, done, rc;
+
+	nl_cb_err(cb, NL_CB_CUSTOM, error_handler, &err);
+	nl_cb_set(cb, NL_CB_FINISH, NL_CB_CUSTOM, finish_handler, &done);
+	nl_cb_set(cb, NL_CB_ACK, NL_CB_CUSTOM, ack_handler, &done);
+    nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, handler, NULL);
+
+	while (!err && !done) {
+		rc = nl_recvmsgs(sock, cb);
+		if (rc) {
+			fprintf(stderr, "Error receiving netlink message: %s",
+								strerror(rc));
+			break;
+		}
+        printf("Received message\n");
+	}
+
+    // ret = nl_recvmsgs(sock, cb);  // Process incoming messages
+    // if (ret < 0) {
+    //     fprintf(stderr, "Failed to receive response: %s\n", nl_geterror(ret));
+    // } else {
+    //     printf("Response received successfully. %d\n", ret);
+    // }
+
+    // Cleanup
+    nl_socket_free(sock);
     return 0;
 }
